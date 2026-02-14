@@ -29,6 +29,16 @@ type ArticulationMode = 'normal' | 'staccato' | 'legato'
 type ParsedProgression = {
   steps: ChordStep[]
 }
+type MidiTextEvent = {
+  tick: number
+  kind: 'on' | 'off'
+  note: number
+  velocity: number
+}
+type ParsedMidiText = {
+  events: MidiTextEvent[]
+  tempoBpmFromText: number | null
+}
 
 const keySpecs: KeySpec[] = [
   { keyboard: 'a', note: 'C4', midi: 60, isBlack: false },
@@ -58,10 +68,16 @@ let selectedPlayMode: PlayMode = 'chord'
 let selectedRhythmMode: RhythmMode = 'straight'
 let selectedArticulation: ArticulationMode = 'normal'
 let tempoBpm = 100
+let midiPpq = 480
 let isPlayingProgression = false
 let progressionTimeouts: number[] = []
 let progressionVoices: ActiveVoice[] = []
+const scheduledHighlightCounts = new Map<string, number>()
 const defaultProgressionInput = 'A – E – F#m – C#m – D – A – D – E'
+const defaultMidiInput = `0    Note On  64 velocity 85
+480  Note Off 64
+480  Note On  69 velocity 90
+960  Note Off 69`
 
 const app = document.querySelector<HTMLDivElement>('#app')
 if (!app) {
@@ -117,6 +133,18 @@ app.innerHTML = `
     <p id="progression-error" class="progression-error" aria-live="polite"></p>
     <button id="play-progression" class="play-btn" type="button" aria-label="コード進行を再生">
       コード進行を再生
+    </button>
+    <label class="progression-control">
+      MIDIテキスト入力
+      <textarea id="midi-input" class="midi-input" aria-label="MIDIテキスト入力">${defaultMidiInput}</textarea>
+    </label>
+    <label class="sound-control">
+      MIDI PPQ
+      <input id="midi-ppq-input" class="tempo-input" type="number" min="24" max="1920" step="1" value="480" aria-label="MIDI PPQ" />
+    </label>
+    <p id="midi-error" class="progression-error" aria-live="polite"></p>
+    <button id="play-midi" class="play-btn" type="button" aria-label="MIDIテキストを再生">
+      MIDIを再生
     </button>
     <div class="keyboard" aria-label="Piano keyboard"></div>
   </main>
@@ -175,6 +203,18 @@ if (tempoInputEl) {
   })
 }
 
+const midiPpqInputEl = document.querySelector<HTMLInputElement>('#midi-ppq-input')
+if (midiPpqInputEl) {
+  midiPpqInputEl.addEventListener('change', (event) => {
+    const raw = Number((event.target as HTMLInputElement).value)
+    if (!Number.isFinite(raw)) {
+      return
+    }
+    midiPpq = Math.max(24, Math.min(1920, Math.round(raw)))
+    midiPpqInputEl.value = String(midiPpq)
+  })
+}
+
 const keyboardEl = document.querySelector<HTMLDivElement>('.keyboard')
 if (!keyboardEl) {
   throw new Error('Keyboard container not found')
@@ -195,7 +235,8 @@ function midiToFrequency(midi: number): number {
 }
 
 function parseChordSymbolToMidiNotes(symbol: string): number[] | null {
-  const match = symbol.trim().match(/^([A-Ga-g])([#b]?)(m|minor|maj)?$/)
+  const normalized = symbol.trim().replace(/\s+/g, '').toLowerCase()
+  const match = normalized.match(/^([a-g])([#b]?)(maj7|m7|minor7|min7|7|dim7|dim|aug|m|minor|maj)?$/)
   if (!match) {
     return null
   }
@@ -223,8 +264,23 @@ function parseChordSymbolToMidiNotes(symbol: string): number[] | null {
   }
   noteClass = (noteClass + 12) % 12
 
-  const isMinor = quality === 'm' || quality === 'minor'
-  const intervals = isMinor ? [0, 3, 7] : [0, 4, 7]
+  let intervals: number[] = [0, 4, 7]
+  if (quality === 'm' || quality === 'minor') {
+    intervals = [0, 3, 7]
+  } else if (quality === 'dim') {
+    intervals = [0, 3, 6]
+  } else if (quality === 'aug') {
+    intervals = [0, 4, 8]
+  } else if (quality === '7') {
+    intervals = [0, 4, 7, 10]
+  } else if (quality === 'maj7') {
+    intervals = [0, 4, 7, 11]
+  } else if (quality === 'm7' || quality === 'min7' || quality === 'minor7') {
+    intervals = [0, 3, 7, 10]
+  } else if (quality === 'dim7') {
+    intervals = [0, 3, 6, 9]
+  }
+
   const rootMidi = 60 + noteClass
   return intervals.map((interval) => rootMidi + interval)
 }
@@ -249,6 +305,67 @@ function parseProgression(input: string): ParsedProgression | null {
   }
 
   return { steps }
+}
+
+function parseMidiText(input: string): ParsedMidiText | null {
+  const lines = input
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+
+  if (lines.length === 0) {
+    return null
+  }
+
+  const events: MidiTextEvent[] = []
+  let tempoBpmFromText: number | null = null
+  for (const line of lines) {
+    const tempoMatch = line.match(/^tempo\s*:\s*(\d+(?:\.\d+)?)\s*bpm$/i)
+    if (tempoMatch) {
+      const tempo = Number(tempoMatch[1])
+      if (Number.isFinite(tempo) && tempo >= 20 && tempo <= 400) {
+        tempoBpmFromText = tempo
+        continue
+      }
+      return null
+    }
+
+    if (/^bar\s*\d+$/i.test(line)) {
+      continue
+    }
+
+    const onMatch = line.match(/^(\d+)\s+note\s*on\s+(\d+)\s+velocity\s+(\d+)$/i)
+    if (onMatch) {
+      const tick = Number(onMatch[1])
+      const note = Number(onMatch[2])
+      const velocity = Number(onMatch[3])
+      if (note < 0 || note > 127 || velocity < 0 || velocity > 127) {
+        return null
+      }
+      events.push({ tick, kind: velocity === 0 ? 'off' : 'on', note, velocity })
+      continue
+    }
+
+    const offMatch = line.match(/^(\d+)\s+note\s*off\s+(\d+)(?:\s+velocity\s+(\d+))?$/i)
+    if (offMatch) {
+      const tick = Number(offMatch[1])
+      const note = Number(offMatch[2])
+      if (note < 0 || note > 127) {
+        return null
+      }
+      events.push({ tick, kind: 'off', note, velocity: Number(offMatch[3] ?? 0) })
+      continue
+    }
+
+    return null
+  }
+
+  if (events.length === 0) {
+    return null
+  }
+
+  events.sort((a, b) => a.tick - b.tick)
+  return { events, tempoBpmFromText }
 }
 
 function ensureAudioContext(): AudioContext {
@@ -299,14 +416,14 @@ function deactivateKeyHighlight(key: string): void {
   activeHighlights.set(key, count - 1)
 }
 
-function createWaveVoice(ctx: AudioContext, frequency: number, tone: WaveToneType): ActiveVoice {
+function createWaveVoice(ctx: AudioContext, frequency: number, tone: WaveToneType, velocityGain: number): ActiveVoice {
   const oscillator = ctx.createOscillator()
   const gain = ctx.createGain()
 
   oscillator.type = tone
   oscillator.frequency.setValueAtTime(frequency, ctx.currentTime)
   gain.gain.setValueAtTime(0.0001, ctx.currentTime)
-  gain.gain.exponentialRampToValueAtTime(0.2, ctx.currentTime + 0.01)
+  gain.gain.exponentialRampToValueAtTime(0.2 * velocityGain, ctx.currentTime + 0.01)
 
   oscillator.connect(gain)
   gain.connect(ctx.destination)
@@ -322,7 +439,7 @@ function createWaveVoice(ctx: AudioContext, frequency: number, tone: WaveToneTyp
   }
 }
 
-function createPianoVoice(ctx: AudioContext, frequency: number): ActiveVoice {
+function createPianoVoice(ctx: AudioContext, frequency: number, velocityGain: number): ActiveVoice {
   const output = ctx.createGain()
   output.gain.setValueAtTime(0.0001, ctx.currentTime)
   output.connect(ctx.destination)
@@ -368,8 +485,8 @@ function createPianoVoice(ctx: AudioContext, frequency: number): ActiveVoice {
   hammerNoise.start()
 
   const now = ctx.currentTime
-  output.gain.exponentialRampToValueAtTime(0.24, now + 0.003)
-  output.gain.exponentialRampToValueAtTime(0.11, now + 0.17)
+  output.gain.exponentialRampToValueAtTime(0.24 * velocityGain, now + 0.003)
+  output.gain.exponentialRampToValueAtTime(0.11 * velocityGain, now + 0.17)
   output.gain.exponentialRampToValueAtTime(0.0001, now + 2.6)
 
   return {
@@ -384,15 +501,16 @@ function createPianoVoice(ctx: AudioContext, frequency: number): ActiveVoice {
   }
 }
 
-function startVoice(frequency: number): ActiveVoice {
+function startVoice(frequency: number, velocity = 100): ActiveVoice {
   const ctx = ensureAudioContext()
   if (ctx.state === 'suspended') {
     void ctx.resume()
   }
 
+  const velocityGain = Math.max(0.2, Math.min(1, velocity / 127))
   return selectedTone === 'piano'
-    ? createPianoVoice(ctx, frequency)
-    : createWaveVoice(ctx, frequency, selectedTone)
+    ? createPianoVoice(ctx, frequency, velocityGain)
+    : createWaveVoice(ctx, frequency, selectedTone, velocityGain)
 }
 
 function noteOn(key: string): void {
@@ -419,6 +537,34 @@ function noteOff(key: string): void {
   deactivateKeyHighlight(key)
 }
 
+function clearScheduledHighlights(): void {
+  for (const [key, count] of scheduledHighlightCounts.entries()) {
+    for (let i = 0; i < count; i += 1) {
+      deactivateKeyHighlight(key)
+    }
+  }
+  scheduledHighlightCounts.clear()
+}
+
+function markScheduledHighlightOn(key: string): void {
+  activateKeyHighlight(key)
+  const count = scheduledHighlightCounts.get(key) ?? 0
+  scheduledHighlightCounts.set(key, count + 1)
+}
+
+function markScheduledHighlightOff(key: string): void {
+  const count = scheduledHighlightCounts.get(key) ?? 0
+  if (count <= 0) {
+    return
+  }
+  deactivateKeyHighlight(key)
+  if (count === 1) {
+    scheduledHighlightCounts.delete(key)
+  } else {
+    scheduledHighlightCounts.set(key, count - 1)
+  }
+}
+
 function stopProgression(): void {
   for (const timeoutId of progressionTimeouts) {
     window.clearTimeout(timeoutId)
@@ -432,6 +578,7 @@ function stopProgression(): void {
     }
   }
   progressionVoices = []
+  clearScheduledHighlights()
   isPlayingProgression = false
 }
 
@@ -465,7 +612,7 @@ function playProgression(): void {
 
   const parsed = parseProgression(progressionInputEl.value)
   if (!parsed) {
-    errorEl.textContent = 'コード進行の形式が不正です。例: A - E - F#m - C#m - D - A - D - E'
+    errorEl.textContent = '形式が不正です。例: A - E7 - F#m7 - C#dim - Dmaj7 - Aaug'
     return
   }
   if (!Number.isFinite(tempoBpm) || tempoBpm < 40 || tempoBpm > 220) {
@@ -497,7 +644,7 @@ function playProgression(): void {
             .map((midi) => midiToKeyboardKey.get(midi))
             .filter((key): key is string => typeof key === 'string')
           for (const key of keysToHighlight) {
-            activateKeyHighlight(key)
+            markScheduledHighlightOn(key)
           }
 
           const startedVoices = step.midiNotes.map((midi) => startVoice(midiToFrequency(midi)))
@@ -512,7 +659,7 @@ function playProgression(): void {
               voice.stop(now)
             }
             for (const key of keysToHighlight) {
-              deactivateKeyHighlight(key)
+              markScheduledHighlightOff(key)
             }
           }, noteMs)
           progressionTimeouts.push(stopTimeout)
@@ -524,7 +671,7 @@ function playProgression(): void {
           const startTimeout = window.setTimeout(() => {
             const maybeKey = midiToKeyboardKey.get(midi)
             if (maybeKey) {
-              activateKeyHighlight(maybeKey)
+              markScheduledHighlightOn(maybeKey)
             }
 
             const voice = startVoice(midiToFrequency(midi))
@@ -536,7 +683,7 @@ function playProgression(): void {
               }
               voice.stop(audioContext.currentTime)
               if (maybeKey) {
-                deactivateKeyHighlight(maybeKey)
+                markScheduledHighlightOff(maybeKey)
               }
             }, Math.max(70, noteMs / step.midiNotes.length))
             progressionTimeouts.push(stopTimeout)
@@ -557,6 +704,79 @@ function playProgression(): void {
   progressionTimeouts.push(finishTimeout)
 }
 
+function playMidiText(): void {
+  const midiInputEl = document.querySelector<HTMLTextAreaElement>('#midi-input')
+  const midiErrorEl = document.querySelector<HTMLElement>('#midi-error')
+  const playMidiBtnEl = document.querySelector<HTMLButtonElement>('#play-midi')
+  if (!midiInputEl || !midiErrorEl || !playMidiBtnEl) {
+    return
+  }
+  const parsed = parseMidiText(midiInputEl.value)
+  if (!parsed) {
+    midiErrorEl.textContent = 'MIDI形式が不正です。例: Tempo: 136 BPM / 0 NoteOn 64 velocity 85'
+    return
+  }
+  const playbackTempo = parsed.tempoBpmFromText ?? tempoBpm
+  if (!Number.isFinite(playbackTempo) || playbackTempo < 40 || playbackTempo > 220) {
+    midiErrorEl.textContent = 'テンポは 40〜220 の範囲で指定してください。'
+    return
+  }
+  if (!Number.isFinite(midiPpq) || midiPpq < 24 || midiPpq > 1920) {
+    midiErrorEl.textContent = 'MIDI PPQ は 24〜1920 の範囲で指定してください。'
+    return
+  }
+  midiErrorEl.textContent = ''
+
+  stopProgression()
+  isPlayingProgression = true
+  playMidiBtnEl.disabled = true
+  playMidiBtnEl.textContent = '再生中... (MIDI)'
+
+  const msPerTick = (60000 / playbackTempo) / midiPpq
+  const activeByNote = new Map<number, ActiveVoice[]>()
+  let endMs = 0
+
+  for (const event of parsed.events) {
+    const startMs = event.tick * msPerTick
+    endMs = Math.max(endMs, startMs)
+
+    const timeoutId = window.setTimeout(() => {
+      const maybeKey = midiToKeyboardKey.get(event.note)
+      if (event.kind === 'on') {
+        const voice = startVoice(midiToFrequency(event.note), event.velocity)
+        progressionVoices.push(voice)
+        const stack = activeByNote.get(event.note) ?? []
+        stack.push(voice)
+        activeByNote.set(event.note, stack)
+        if (maybeKey) {
+          markScheduledHighlightOn(maybeKey)
+        }
+        return
+      }
+
+      const stack = activeByNote.get(event.note)
+      const voice = stack?.shift()
+      if (voice && audioContext) {
+        voice.stop(audioContext.currentTime)
+      }
+      if (stack && stack.length === 0) {
+        activeByNote.delete(event.note)
+      }
+      if (maybeKey) {
+        markScheduledHighlightOff(maybeKey)
+      }
+    }, startMs)
+    progressionTimeouts.push(timeoutId)
+  }
+
+  const finishTimeout = window.setTimeout(() => {
+    stopProgression()
+    playMidiBtnEl.disabled = false
+    playMidiBtnEl.textContent = 'MIDIを再生'
+  }, endMs + 300)
+  progressionTimeouts.push(finishTimeout)
+}
+
 const playProgressionEl = document.querySelector<HTMLButtonElement>('#play-progression')
 if (playProgressionEl) {
   playProgressionEl.addEventListener('click', () => {
@@ -564,6 +784,16 @@ if (playProgressionEl) {
       return
     }
     playProgression()
+  })
+}
+
+const playMidiEl = document.querySelector<HTMLButtonElement>('#play-midi')
+if (playMidiEl) {
+  playMidiEl.addEventListener('click', () => {
+    if (isPlayingProgression) {
+      return
+    }
+    playMidiText()
   })
 }
 

@@ -86,6 +86,17 @@ p {
   color: #1d2a35;
 }
 
+.midi-input {
+  width: 100%;
+  min-height: 116px;
+  border: 1px solid #9db2cb;
+  border-radius: 8px;
+  padding: 0.5rem 0.55rem;
+  font: 500 0.92rem/1.4 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+  background: #f8fbff;
+  color: #1d2a35;
+}
+
 .progression-error {
   margin: 0 0 0.5rem;
   min-height: 1.2rem;
