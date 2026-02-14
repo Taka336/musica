@@ -40,6 +40,77 @@ p {
   margin: 0.45rem 0 1rem;
 }
 
+.sound-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 0 0.9rem;
+  font-weight: 600;
+}
+
+.sound-control select {
+  border: 1px solid #9db2cb;
+  border-radius: 8px;
+  padding: 0.35rem 0.55rem;
+  font: inherit;
+  background: #f8fbff;
+  color: #1d2a35;
+}
+
+.tempo-input {
+  width: 92px;
+  border: 1px solid #9db2cb;
+  border-radius: 8px;
+  padding: 0.35rem 0.55rem;
+  font: inherit;
+  background: #f8fbff;
+  color: #1d2a35;
+}
+
+.progression-control {
+  display: flex;
+  gap: 0.45rem;
+  align-items: center;
+  margin: 0 0 0.4rem;
+  font-weight: 600;
+}
+
+.progression-control input {
+  flex: 1;
+  min-width: 240px;
+  border: 1px solid #9db2cb;
+  border-radius: 8px;
+  padding: 0.38rem 0.55rem;
+  font: inherit;
+  background: #f8fbff;
+  color: #1d2a35;
+}
+
+.progression-error {
+  margin: 0 0 0.5rem;
+  min-height: 1.2rem;
+  color: #9d2c2c;
+  font-size: 0.9rem;
+}
+
+.play-btn {
+  display: inline-block;
+  margin: 0 0 1rem 0.6rem;
+  border: 1px solid #8fa8c8;
+  border-radius: 9px;
+  padding: 0.4rem 0.75rem;
+  font: inherit;
+  font-weight: 700;
+  color: #17304f;
+  background: linear-gradient(180deg, #f5f9ff 0%, #dce9f9 100%);
+  cursor: pointer;
+}
+
+.play-btn:disabled {
+  opacity: 0.72;
+  cursor: not-allowed;
+}
+
 .keyboard {
   position: relative;
   display: flex;
